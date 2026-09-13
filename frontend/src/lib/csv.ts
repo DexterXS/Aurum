@@ -57,12 +57,17 @@ export function parseCsv(text: string): string[][] {
 export const DATE_FORMATS = ["YYYY-MM-DD", "DD.MM.YYYY", "DD/MM/YYYY", "MM/DD/YYYY", "DD-MM-YYYY"] as const;
 export type DateFormat = (typeof DATE_FORMATS)[number];
 
+// Every pattern tolerates an optional trailing time of day ("24.10.2018
+// 17:04:25", "2024-01-05T09:30") — bank exports routinely timestamp each
+// operation (T-Bank, monobank), and the wizard only stores the calendar
+// date anyway.
+const TIME_SUFFIX = /(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/.source;
 const DATE_PATTERNS: Record<DateFormat, { regex: RegExp; order: ["y" | "m" | "d", "y" | "m" | "d", "y" | "m" | "d"] }> = {
-  "YYYY-MM-DD": { regex: /^(\d{4})-(\d{1,2})-(\d{1,2})$/, order: ["y", "m", "d"] },
-  "DD.MM.YYYY": { regex: /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/, order: ["d", "m", "y"] },
-  "DD/MM/YYYY": { regex: /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, order: ["d", "m", "y"] },
-  "MM/DD/YYYY": { regex: /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, order: ["m", "d", "y"] },
-  "DD-MM-YYYY": { regex: /^(\d{1,2})-(\d{1,2})-(\d{4})$/, order: ["d", "m", "y"] },
+  "YYYY-MM-DD": { regex: new RegExp(/^(\d{4})-(\d{1,2})-(\d{1,2})/.source + TIME_SUFFIX), order: ["y", "m", "d"] },
+  "DD.MM.YYYY": { regex: new RegExp(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/.source + TIME_SUFFIX), order: ["d", "m", "y"] },
+  "DD/MM/YYYY": { regex: new RegExp(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/.source + TIME_SUFFIX), order: ["d", "m", "y"] },
+  "MM/DD/YYYY": { regex: new RegExp(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/.source + TIME_SUFFIX), order: ["m", "d", "y"] },
+  "DD-MM-YYYY": { regex: new RegExp(/^(\d{1,2})-(\d{1,2})-(\d{4})/.source + TIME_SUFFIX), order: ["d", "m", "y"] },
 };
 
 /** Parses `raw` per `format`, returning an ISO "YYYY-MM-DD" string, or null

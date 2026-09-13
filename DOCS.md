@@ -368,6 +368,16 @@ Used by the CSV import wizard, but callable directly for any bulk load (e.g. syn
 export tool). All rows are validated **before** any is inserted — one bad row fails the whole
 request with no partial import.
 
+The wizard itself (`/transactions/import`) is bank-agnostic: it auto-detects delimiter and
+encoding and lets you map columns by hand. On top of that it ships **bank profiles** that pre-fill
+the mapping and formats when the header row matches a known export (or when you pick the bank
+explicitly): **T-Bank** (semicolon CSV, `Сумма платежа`, rows with `Статус ≠ OK` skipped),
+**monobank** (Ukrainian-language CSV, `Сума в валюті картки (…)`) and **PrivatBank**
+(`Сума в валюті картки`, `Опис операції`). Profiles live in `frontend/src/lib/bankPresets.ts` —
+adding a bank is one declarative entry (header matchers, date/amount format, optional row filter).
+Banks that only export PDF/XLSX (Sber, Kaspi, Halyk, maib…) are imported via a third-party
+PDF→CSV converter and the manual mapping.
+
 ```json
 { "items": [ /* 1–5000 TransactionCreate objects */ ] }
 ```
@@ -768,7 +778,7 @@ Single row, created automatically on first run — there's nothing to create, on
   "risky_allocation_threshold_percent": 20,
   "idle_cash_threshold_amount": "1000.00",
   "idle_cash_threshold_days": 60,
-  "app_version": "1.1.7"
+  "app_version": "1.1.8"
 }
 ```
 

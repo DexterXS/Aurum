@@ -9,6 +9,15 @@ import { useCategories } from "@/hooks/useCategories";
 import { useBulkCreateTransactions, useTransactionsForDuplicateCheck } from "@/hooks/useTransactions";
 import { translateCategoryName } from "@/lib/categoryLabels";
 import {
+  BANK_PRESETS,
+  applyPresetMapping,
+  detectPreset,
+  findPreset,
+  rowFilterRejection,
+  type BankPreset,
+  type ImportMapping,
+} from "@/lib/bankPresets";
+import {
   AMOUNT_FORMATS,
   DATE_FORMATS,
   parseAmount,
@@ -35,14 +44,12 @@ const NONE = "";
 const ENCODINGS = ["utf-8", "windows-1251", "windows-1252", "koi8-r"] as const;
 type Encoding = (typeof ENCODINGS)[number];
 
-interface Mapping {
-  date: string;
-  amount: string;
-  description: string;
-  merchant: string;
-  notes: string;
-  category: string;
-}
+// Header names, not indexes — see lib/bankPresets.ts's ImportMapping.
+type Mapping = ImportMapping;
+
+// "auto" lets detectPreset() pick a bank profile from the header row; a
+// preset id pins one regardless of what the headers look like.
+const PRESET_AUTO = "auto";
 
 interface SkippedRow {
   row: number;
@@ -72,6 +79,26 @@ function guessMapping(headerRow: string[]): Mapping {
   };
 }
 
+/** The bank profile in force for a given header row: the pinned one when
+ * the user picked a bank, otherwise whatever the headers match (or null —
+ * plain generic mapping). Pure, so both the file handler and the
+ * header-change effect below resolve it the same way. */
+function resolvePreset(headers: string[], presetChoice: string): BankPreset | null {
+  return presetChoice === PRESET_AUTO ? detectPreset(headers) : findPreset(presetChoice);
+}
+
+/** Map-step defaults for a header row: the preset's answers where it has
+ * them, the generic header guesses everywhere else. */
+function resolveDefaults(headers: string[], preset: BankPreset | null): { mapping: Mapping; dateFormat: DateFormat; amountFormat: AmountFormat } {
+  const guessed = guessMapping(headers);
+  if (!preset) return { mapping: guessed, dateFormat: "YYYY-MM-DD", amountFormat: "auto" };
+  return {
+    mapping: applyPresetMapping(preset, headers, guessed),
+    dateFormat: preset.dateFormat,
+    amountFormat: preset.amountFormat,
+  };
+}
+
 export function CsvImportPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -85,6 +112,7 @@ export function CsvImportPage() {
   const [fileName, setFileName] = useState("");
   const [fileBuffer, setFileBuffer] = useState<ArrayBuffer | null>(null);
   const [encoding, setEncoding] = useState<Encoding>("utf-8");
+  const [presetChoice, setPresetChoice] = useState<string>(PRESET_AUTO);
   const [mapping, setMapping] = useState<Mapping>({ date: "", amount: "", description: "", merchant: "", notes: "", category: "" });
   const [dateFormat, setDateFormat] = useState<DateFormat>("YYYY-MM-DD");
   const [amountFormat, setAmountFormat] = useState<AmountFormat>("auto");
@@ -105,7 +133,10 @@ export function CsvImportPage() {
     return { headers: headerRow, dataRows: rest };
   }, [fileBuffer, encoding]);
 
-  // Owns mapping initialisation, keyed on the header row's *contents*.
+  const activePreset = useMemo(() => resolvePreset(headers, presetChoice), [headers, presetChoice]);
+
+  // Owns mapping initialisation, keyed on the header row's *contents* and
+  // the chosen bank profile.
   // Changing the encoding re-decodes that row, and a column picked under the
   // previous encoding then names a header that no longer exists:
   // headers.indexOf() returns -1, the dropdown renders blank while
@@ -114,15 +145,25 @@ export function CsvImportPage() {
   // reading of a mapping whose columns are all gone. When the decoded
   // headers come out identical (an all-ASCII header row survives every
   // encoding here), the key doesn't change, this doesn't run, and manual
-  // column picks stay put.
+  // column picks stay put. Switching the bank profile re-runs it on
+  // purpose: the whole point of picking a bank is to replace the mapping.
   // JSON.stringify, not join(): joining on a separator would read
   // ["ab","c"] and ["a","bc"] as one and the same header row.
   const headersKey = JSON.stringify(headers);
   useEffect(() => {
     if (headers.length === 0) return;
-    setMapping(guessMapping(headers));
+    const preset = resolvePreset(headers, presetChoice);
+    const defaults = resolveDefaults(headers, preset);
+    setMapping(defaults.mapping);
+    // Formats are only overwritten when a bank profile dictates them; with
+    // no profile, a date format the user picked by hand survives an
+    // encoding switch (the fresh-file reset lives in handleFileSelected).
+    if (preset) {
+      setDateFormat(defaults.dateFormat);
+      setAmountFormat(defaults.amountFormat);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headersKey]);
+  }, [headersKey, presetChoice]);
 
   const categoryLookup = useMemo(() => {
     const map: Record<"income" | "expense", Map<string, number>> = { income: new Map(), expense: new Map() };
@@ -206,6 +247,15 @@ export function CsvImportPage() {
       const rawNotes = notesIdx >= 0 ? (cells[notesIdx] ?? "").trim() : "";
       const rawCategory = categoryIdx >= 0 ? (cells[categoryIdx] ?? "").trim() : "";
 
+      // Bank-profile row filter first (e.g. T-Bank's "Статус" = FAILED):
+      // a declined payment parses perfectly well as a date + amount, and
+      // nothing downstream could tell it apart from a real expense.
+      const rejectedStatus = rowFilterRejection(activePreset, headers, cells);
+      if (rejectedStatus !== null) {
+        skippedRows.push({ row: rowNumber, reason: t("transactions.import.errorRowFiltered", { value: rejectedStatus || "—" }) });
+        return;
+      }
+
       const isoDate = parseDateWithFormat(rawDate, dateFormat);
       if (!isoDate) {
         skippedRows.push({ row: rowNumber, reason: t("transactions.import.errorBadDate", { value: rawDate || "—" }) });
@@ -251,7 +301,7 @@ export function CsvImportPage() {
       duplicateCount: duplicateRows.length,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, headers, dataRows, mapping, dateFormat, amountFormat, categoryLookup, accountId, existingKeys, includeDuplicates, t]);
+  }, [step, headers, dataRows, mapping, dateFormat, amountFormat, categoryLookup, accountId, existingKeys, includeDuplicates, activePreset, t]);
 
   async function handleFileSelected(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -277,11 +327,16 @@ export function CsvImportPage() {
       return;
     }
     const [headerRow] = rows;
+    // Full reset for a fresh file — the header-change effect above skips
+    // files whose header row is byte-identical to the previous one, so
+    // formats from the last import can't be left over here.
+    const defaults = resolveDefaults(headerRow, resolvePreset(headerRow, presetChoice));
     setFileName(file.name);
     setFileBuffer(buffer);
     setEncoding(detectedEncoding);
-    setMapping(guessMapping(headerRow));
-    setAmountFormat("auto");
+    setMapping(defaults.mapping);
+    setDateFormat(defaults.dateFormat);
+    setAmountFormat(defaults.amountFormat);
     setIncludeDuplicates(false);
     setStep("map");
   }
@@ -306,6 +361,23 @@ export function CsvImportPage() {
   }
 
   const mappingComplete = Boolean(mapping.date && mapping.amount && mapping.description);
+
+  // Same control on the upload and map steps: picking the bank up front is
+  // the "I know what this file is" path, changing it on the map step is the
+  // "auto-detect guessed wrong" path.
+  const presetSelect = (id: string) => (
+    <div>
+      <Label htmlFor={id}>{t("transactions.import.presetLabel")}</Label>
+      <Select id={id} value={presetChoice} onChange={(event) => setPresetChoice(event.target.value)} className="sm:w-72">
+        <option value={PRESET_AUTO}>{t("transactions.import.preset.auto")}</option>
+        {BANK_PRESETS.map((preset) => (
+          <option key={preset.id} value={preset.id}>
+            {preset.label}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
 
   return (
     <div className="space-y-5">
@@ -346,6 +418,8 @@ export function CsvImportPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-text-secondary">{t("transactions.import.uploadHint")}</p>
+            {presetSelect("upload-preset")}
+            <p className="text-xs text-text-muted">{t("transactions.import.presetHint")}</p>
             <Button onClick={() => fileInputRef.current?.click()} disabled={!accountId}>
               <Upload size={16} />
               {t("transactions.import.chooseFile")}
@@ -364,6 +438,13 @@ export function CsvImportPage() {
             <span className="text-xs text-text-muted">{fileName}</span>
           </CardHeader>
           <CardContent className="space-y-3">
+            {presetSelect("map-preset")}
+            <p className={`text-xs ${activePreset ? "text-success" : "text-text-muted"}`}>
+              {activePreset
+                ? t("transactions.import.presetDetected", { bank: activePreset.label })
+                : t("transactions.import.presetNotDetected")}
+            </p>
+
             <div>
               <Label htmlFor="map-encoding">{t("transactions.import.encodingLabel")}</Label>
               <Select id="map-encoding" value={encoding} onChange={(event) => setEncoding(event.target.value as Encoding)} className="sm:w-56">

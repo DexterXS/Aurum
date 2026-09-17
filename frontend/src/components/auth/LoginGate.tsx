@@ -1,55 +1,46 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { Logo } from "@/components/layout/Logo";
 import { LoginScreen } from "@/components/auth/LoginScreen";
-import { NoAuthModal } from "@/components/auth/NoAuthModal";
-import { checkCredentials, useAuthHeader, whenAuthRestored } from "@/lib/auth";
+import { useAuthHeader, whenAuthRestored } from "@/lib/auth";
 
-// "not-configured" and "authenticated" both render `children` the same way,
-// but they must stay distinct: only "not-configured" means this instance has
-// no AURUM_BASIC_AUTH_USER/PASSWORD at all (nginx never sent 401 to our
-// deliberately-wrong probe header), which is what triggers NoAuthModal.
-// Collapsing them back into one "not-required" state would make an
-// authenticated session with valid stored credentials show the "this
-// instance has no password" warning too.
-type Probe = "checking" | "required" | "not-configured" | "authenticated";
+type GateState = "checking" | "required" | "authenticated";
 
-/** Wraps the whole app. Renders the login screen only when this instance
- * actually has Basic Auth turned on (AURUM_BASIC_AUTH_USER/PASSWORD in
- * .env, see frontend/docker-entrypoint.d/20-basic-auth.sh) — most installs
- * don't, and this must never force a login screen on those. When stored
- * credentials go stale (password changed, or auth was just turned on) the
- * 401 handler in api/client.ts clears them, useAuthHeader() picks that up
- * reactively, and this falls back to the login screen on its own. */
+/**
+ * Railway/mobile-safe login gate.
+ *
+ * Older versions tried a deliberately-wrong Basic Authorization header on
+ * startup to detect whether nginx authentication was enabled. Android Chrome
+ * can convert nginx's 401 + WWW-Authenticate response into its native Basic
+ * Auth dialog. Because that probe header is explicitly wrong, entering the
+ * correct credentials into the browser dialog still cannot satisfy the probe,
+ * producing an endless login-popup loop.
+ *
+ * This fork is a protected personal deployment, so there is no need to probe.
+ * We first restore any remembered Aurum credential; if none exists we render
+ * Aurum's own login screen without touching /api at all. The first protected
+ * request is therefore the user's actual credential check.
+ */
 export function LoginGate({ children }: { children: ReactNode }) {
   const authHeader = useAuthHeader();
-  const [probe, setProbe] = useState<Probe>(authHeader ? "authenticated" : "checking");
+  const [state, setState] = useState<GateState>(authHeader ? "authenticated" : "checking");
 
   useEffect(() => {
     if (authHeader) {
-      setProbe("authenticated");
+      setState("authenticated");
       return;
     }
+
     let cancelled = false;
-    // Wait for the encrypted "remember me" credential to be read back before
-    // concluding anything: it arrives asynchronously (IndexedDB + WebCrypto),
-    // and probing first would show the login screen for a moment to someone
-    // who is, in fact, already logged in. When it does arrive it sets the
-    // header, which re-runs this effect down the authenticated path above.
-    void whenAuthRestored()
-      .then(() => (cancelled ? null : checkCredentials(null)))
-      .then((result) => {
-        if (cancelled || result === null) return;
-        // A network/backend error here isn't an auth problem — don't block
-        // the user behind a login screen for an unrelated outage, let the
-        // app's own per-page error states (e.g. dashboard.errorLoading) explain it.
-        setProbe(result === "unauthorized" ? "required" : "not-configured");
-      });
+    void whenAuthRestored().then(() => {
+      if (!cancelled) setState("required");
+    });
+
     return () => {
       cancelled = true;
     };
   }, [authHeader]);
 
-  if (probe === "checking") {
+  if (state === "checking") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-surface-0">
         <Logo size={40} className="animate-pulse" />
@@ -57,14 +48,9 @@ export function LoginGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (probe === "required" && !authHeader) {
+  if (state === "required" && !authHeader) {
     return <LoginScreen />;
   }
 
-  return (
-    <>
-      {probe === "not-configured" && <NoAuthModal />}
-      {children}
-    </>
-  );
+  return <>{children}</>;
 }

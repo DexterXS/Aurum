@@ -20,10 +20,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  if (response.status === 401) {
-    // Stored credentials are missing/stale (password changed, or Basic Auth
-    // was just turned on) — drop them so LoginGate falls back to the login
-    // screen instead of every request failing silently forever.
+  // 403 is used by Aurum's nginx gate on bad temporary credentials on purpose:
+  // unlike 401 + WWW-Authenticate it does not trigger a native Basic Auth
+  // dialog in mobile browsers. Keep accepting 401 as well for compatibility.
+  if (response.status === 401 || response.status === 403) {
     clearCredentials();
   }
 

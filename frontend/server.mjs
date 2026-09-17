@@ -188,3 +188,5 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`[aurum-web] backend: http://${backendHost}:${backendPort}`);
   console.log(`[aurum-web] auth: ${authUser && authPassword ? `enabled for ${authUser}` : "DISABLED"}`);
 });
+
+// Railway production gateway: static SPA + private API proxy + temporary auth.

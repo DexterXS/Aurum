@@ -1,28 +1,29 @@
 #!/bin/sh
-# Runs automatically before nginx starts (official nginx image convention:
-# every executable script in /docker-entrypoint.d/ is sourced on boot).
+# Optional single-user gate for Aurum's /api routes.
 #
-# Aurum's backend has no login system by design (see backend/app/main.py) —
-# it's built for one person self-hosting their own instance, not a
-# multi-tenant service. That means whoever can reach this container can
-# read, edit, and delete all financial data with no password at all. This
-# script is the only gate in front of that: if AURUM_BASIC_AUTH_USER and
-# AURUM_BASIC_AUTH_PASSWORD are set, it turns on HTTP Basic Auth for the
-# whole app (UI + API) at the nginx layer, in front of everything except
-# the health check endpoint (which must stay reachable for Docker's own
-# HEALTHCHECK and external uptime monitors).
+# Do NOT use nginx auth_basic here. auth_basic answers failed credentials with
+# `401 WWW-Authenticate: Basic`, and mobile Chrome may turn that response into
+# its own native username/password dialog even when the React app deliberately
+# sent a probe Authorization header. Aurum already has a branded login screen,
+# so that browser dialog is both confusing and, on some clients, blocks the app.
+#
+# Instead we compare the incoming Basic Authorization header ourselves and
+# return 403 on a mismatch. 403 intentionally carries no WWW-Authenticate
+# challenge, so the browser leaves the response to the React login flow.
+# The credentials still travel only inside HTTPS when the public Railway URL is
+# used. This remains a temporary single-user gate, not a multi-user auth system.
 set -eu
 
 AUTH_FRAGMENT=/etc/nginx/basic-auth.conf
 
 if [ -n "${AURUM_BASIC_AUTH_USER:-}" ] && [ -n "${AURUM_BASIC_AUTH_PASSWORD:-}" ]; then
-  HASH="$(openssl passwd -apr1 "$AURUM_BASIC_AUTH_PASSWORD")"
-  echo "${AURUM_BASIC_AUTH_USER}:${HASH}" > /etc/nginx/.htpasswd
+  EXPECTED_BASIC="$(printf '%s:%s' "$AURUM_BASIC_AUTH_USER" "$AURUM_BASIC_AUTH_PASSWORD" | base64 | tr -d '\r\n')"
   cat > "$AUTH_FRAGMENT" <<EOF
-auth_basic "Aurum";
-auth_basic_user_file /etc/nginx/.htpasswd;
+if (\$http_authorization != "Basic ${EXPECTED_BASIC}") {
+  return 403;
+}
 EOF
-  echo "[aurum] Basic auth enabled for user '${AURUM_BASIC_AUTH_USER}'."
+  echo "[aurum] API auth enabled for user '${AURUM_BASIC_AUTH_USER}' (challenge-free 403 mode)."
 else
   : > "$AUTH_FRAGMENT"
   echo "[aurum] WARNING: AURUM_BASIC_AUTH_USER / AURUM_BASIC_AUTH_PASSWORD are not set." >&2
